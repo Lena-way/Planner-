@@ -520,13 +520,20 @@ async function pull(first){
     const a=data&&data.data&&adopt(data.data);
     let linked=false;try{linked=localStorage.getItem(linkKey())==='1';}catch(_){}
     if(!a){await push();}
-    else if(!linked&&hasOwnData()&&JSON.stringify(a.items)!==JSON.stringify(M.items)){conflict={server:a};render();}
+    else if(!linked&&hasOwnData()&&JSON.stringify({i:a.items,p:a.plan})!==JSON.stringify({i:M.items,p:M.plan})){conflict={server:a};render();}
     else if((a.rev||0)>(M.rev||0)){if(!editing&&!editingCat){M=a;saveLocal();try{localStorage.setItem(linkKey(),'1');}catch(_){}render();}}
     else if((M.rev||0)>(a.rev||0)){await push();}
     else{try{localStorage.setItem(linkKey(),'1');}catch(_){}}
     if(!conflict)setMsg('Синхронизировано · '+(sbUser.email||''));
-  }catch(e){setMsg('Нет связи с облаком. Работаю с данными на устройстве.');}
+  }catch(e){setMsg('Нет связи с облаком ('+((e&&e.message)||'ошибка')+'). Работаю с данными на устройстве.');}
   pulling=false;
+}
+async function forcePull(){
+  if(!sb||!sbUser)return;
+  try{const {data,error}=await sb.from('planner').select('data').eq('user_id',sbUser.id).maybeSingle();if(error)throw error;
+    const a=data&&data.data&&adopt(data.data);if(!a){setMsg('В облаке пока пусто.');return;}
+    M=a;conflict=null;saveLocal();try{localStorage.setItem(linkKey(),'1');}catch(_){}settingsOpen=false;render();setMsg('Загружено из облака · '+(sbUser.email||''));
+  }catch(e){setMsg('Не удалось загрузить из облака: '+((e&&e.message)||'ошибка'));}
 }
 function sbInit(){
   if(!window.supabase||SB_URL.indexOf('__')===0){authReady=true;return;}
@@ -539,7 +546,9 @@ function sbInit(){
   });
   document.addEventListener('visibilitychange',()=>{if(!document.hidden&&sbUser)pull(false);});
   window.addEventListener('online',()=>{if(sbUser)pull(false);});
-  setInterval(()=>{if(sbUser&&!document.hidden)pull(false);},60000);
+  setInterval(()=>{if(sbUser&&!document.hidden)pull(false);},20000);
+  window.addEventListener('focus',()=>{if(sbUser)pull(false);});
+  window.addEventListener('pageshow',()=>{if(sbUser)pull(false);});
 }
 function authHTML(){
   if(!authReady)return '<div class="auth"><div class="sub">Загрузка…</div></div>';
@@ -636,7 +645,7 @@ function dayView(){
   if(kitOpen)h+=kitHTML();
   {const lb=M.settings.lastBackup,old=!lb||Math.round((pd(td)-pd(lb))/864e5)>=10;if(old&&M.settings.tips&&!sbUser&&Object.keys(M.plan).length)h+=`<div class="panel row" style="justify-content:space-between"><span class="sub" style="flex:1;min-width:180px">${lb?'Последняя копия данных была '+fmtD(lb)+'.':'Копии данных ещё не было.'} Сохрани её, чтобы ничего не потерять.</span><button class="btn sm" data-a="go" data-v="review">К копии</button></div>`;}
   if(localOnly)h+='<div class="panel stack"><b>Данные сохраняются только на этом устройстве</b><div class="sub">Здесь нет связи с твоим аккаунтом, поэтому отметки с телефона и с компьютера не попадают друг к другу. Открой страницу из приложения Claude, где ты вошла в аккаунт.</div></div>';
-  if(settingsOpen)h+=`<div class="panel stack"><h2>Настройки</h2>${sbUser?`<div class="setrow"><span class="sub">Аккаунт: ${esc(sbUser.email||'')}</span><button class="btn sm" data-a="au-out">Выйти</button></div>`:''}<div class="setrow"><span>Шагов в каждой сфере за неделю</span><div class="row"><button class="step" data-a="pc-dec" aria-label="Меньше">−</button><b>${pc}</b><button class="step" data-a="pc-inc" aria-label="Больше">+</button></div></div><div class="sub">Кольцо сферы замыкается, когда за неделю в ней сделано столько шагов. Это ориентир, а не обязаловка.</div><label class="setrow"><span>Мягкие подсказки</span><input type="checkbox" data-set="tips"${M.settings.tips?' checked':''}></label></div>`;
+  if(settingsOpen)h+=`<div class="panel stack"><h2>Настройки</h2>${sbUser?`<div class="setrow"><span class="sub">Аккаунт: ${esc(sbUser.email||'')}</span><button class="btn sm" data-a="au-out">Выйти</button></div><div class="setrow"><span class="sub">Если здесь не то, что на другом устройстве</span><button class="btn sm" data-a="cloud-pull">Загрузить из облака</button></div>`:''}<div class="setrow"><span>Шагов в каждой сфере за неделю</span><div class="row"><button class="step" data-a="pc-dec" aria-label="Меньше">−</button><b>${pc}</b><button class="step" data-a="pc-inc" aria-label="Больше">+</button></div></div><div class="sub">Кольцо сферы замыкается, когда за неделю в ней сделано столько шагов. Это ориентир, а не обязаловка.</div><label class="setrow"><span>Мягкие подсказки</span><input type="checkbox" data-set="tips"${M.settings.tips?' checked':''}></label></div>`;
   // полоса недели
   h+=`<div class="strip"><button class="arr" data-a="goday" data-d="${addDays(d,-1)}" aria-label="Предыдущий день">‹</button>`;
   for(let i=0;i<7;i++){const x=addDays(wk,i),n=(M.plan[x]||[]).length,dn=acts(x,x).length;
@@ -864,6 +873,7 @@ document.addEventListener('click',e=>{
     else if(it.quick)removeItem(it.id);
     else{it.done=false;it.doneAt=null;}
     render();persist();break;}
+  case 'cloud-pull':forcePull();break;
   case 'au-up':authSubmit('up');break;
   case 'au-out':if(sb){sb.auth.signOut();try{localStorage.removeItem(linkKey());}catch(_){}}settingsOpen=false;break;
   case 'cf-server':if(conflict){M=conflict.server;conflict=null;saveLocal();try{localStorage.setItem(linkKey(),'1');}catch(_){}render();setMsg('Синхронизировано · '+(sbUser.email||''));}break;
