@@ -8,6 +8,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="План">
 <link rel="manifest" href="manifest.webmanifest">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Onest:wght@300;400;500;600&family=Inter:wght@300;400;500;600&family=Manrope:wght@300;400;500;600&family=Lora:wght@400;500;600&family=PT+Serif:wght@400;700&family=Comfortaa:wght@300;400;500;600&display=swap">
@@ -253,6 +254,9 @@ textarea.in{min-height:84px;resize:vertical;font:inherit}
 .toast span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .toast button{flex:none;border:0;background:transparent;color:inherit;font-weight:600;text-decoration:underline;text-underline-offset:3px;cursor:pointer;padding:4px 6px}
 .drow .undo{margin:-6px -6px -6px 0;font-size:1rem}
+.auth{max-width:380px;margin:12vh auto 0;width:100%}
+.auth h1{font-size:2.4rem}
+.bnav[hidden]{display:none}
 .cnt{font-size:12px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
 </style></head><body>
 <main id="app"></main>
@@ -406,7 +410,7 @@ let view='day',curDay=todayK(),picker=null,editing=null,editingCat=null,addStep=
 const pickOpen=new Set();
 let goalMode='pr',showDone=false,settingsOpen=false,kitOpen=false,resetConfirm=false,localOnly=false,backupText='',backupMsg='',pendingRestore=null;
 const expanded=new Set(),opened=new Set();
-let syncMsg='Данные хранятся на этом устройстве. Раз в неделю сохраняй копию во вкладке «Итоги».';
+let syncMsg='Данные хранятся на этом устройстве.';
 const IT=id=>M.items.find(i=>i.id===id);
 const CAT=id=>M.cats.find(c=>c.id===id);
 const OTHER={id:'',title:'Другое',c:'ochre'};
@@ -477,17 +481,93 @@ function hideToast(){const t=document.getElementById('toast');if(t)t.hidden=true
 /* ---------- сохранение ---------- */
 let dbDoc=null,saving=false,dirty=false;
 function saveLocal(){try{localStorage.setItem('plan-model5',JSON.stringify(M));}catch(_){}}
-async function saveDb(){
-  if(!dbDoc)return;
-  if(saving){dirty=true;return;}
-  saving=true;
-  try{await dbDoc.set({model:M});syncMsg='Сохранено в твоём аккаунте.';}
-  catch(e){syncMsg='Не удалось сохранить в аккаунт ('+((e&&e.code)||'ошибка')+'). Пока хранится в этом браузере.';}
-  saving=false;setSync();
-  if(dirty){dirty=false;saveDb();}
-}
 function setSync(){const s=document.getElementById('sync');if(s)s.textContent=syncMsg;}
 function persist(){M.rev=Date.now();saveLocal();saveDb();}
+/* ---------- облако: вход и синхронизация через Supabase ---------- */
+const SB_URL='https://mohagbartbkmrwxtdasc.supabase.co',SB_KEY='sb_publishable_oqO-DdkueYq1N0Xcq_Z95g_ysYVQ77A';
+let sb=null,sbUser=null,authReady=false,authMsg='',authBusy=false,pushTimer=null,pulling=false,pushing=false,pushAgain=false,conflict=null;
+const sbOn=()=>!!sb;
+const linkKey=()=>'plan-linked-'+(sbUser?sbUser.id:'');
+function setMsg(t){syncMsg=t;setSync();}
+async function saveDb(){
+  if(!sb||!sbUser||conflict)return;
+  clearTimeout(pushTimer);pushTimer=setTimeout(push,700);
+}
+async function push(){
+  if(!sb||!sbUser||conflict)return;
+  if(pushing){pushAgain=true;return;}
+  pushing=true;
+  try{
+    const {error}=await sb.from('planner').upsert({user_id:sbUser.id,data:M,rev:M.rev||0,updated_at:new Date().toISOString()});
+    if(error)throw error;
+    try{localStorage.setItem(linkKey(),'1');localStorage.removeItem('plan-unsynced');}catch(_){}
+    setMsg('Сохранено в облаке · '+(sbUser.email||''));
+  }catch(e){
+    try{localStorage.setItem('plan-unsynced','1');}catch(_){}
+    setMsg(navigator.onLine===false?'Нет интернета. Изменения сохранены на устройстве и отправятся сами.':'Не удалось сохранить в облако, попробую ещё раз.');
+    setTimeout(()=>{if(sbUser)push();},15000);
+  }
+  pushing=false;
+  if(pushAgain){pushAgain=false;push();}
+}
+const hasOwnData=()=>Object.keys(M.plan||{}).length>0||(M.items||[]).some(i=>i.done||(i.log&&i.log.length))||(M.rev||0)>0;
+async function pull(first){
+  if(!sb||!sbUser||pulling)return;
+  pulling=true;
+  try{
+    const {data,error}=await sb.from('planner').select('data,rev').eq('user_id',sbUser.id).maybeSingle();
+    if(error)throw error;
+    const a=data&&data.data&&adopt(data.data);
+    let linked=false;try{linked=localStorage.getItem(linkKey())==='1';}catch(_){}
+    if(!a){await push();}
+    else if(!linked&&hasOwnData()&&JSON.stringify(a.items)!==JSON.stringify(M.items)){conflict={server:a};render();}
+    else if((a.rev||0)>(M.rev||0)){if(!editing&&!editingCat){M=a;saveLocal();try{localStorage.setItem(linkKey(),'1');}catch(_){}render();}}
+    else if((M.rev||0)>(a.rev||0)){await push();}
+    else{try{localStorage.setItem(linkKey(),'1');}catch(_){}}
+    if(!conflict)setMsg('Синхронизировано · '+(sbUser.email||''));
+  }catch(e){setMsg('Нет связи с облаком. Работаю с данными на устройстве.');}
+  pulling=false;
+}
+function sbInit(){
+  if(!window.supabase||SB_URL.indexOf('__')===0){authReady=true;return;}
+  sb=window.supabase.createClient(SB_URL,SB_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false}});
+  sb.auth.getSession().then(({data})=>{sbUser=data&&data.session?data.session.user:null;authReady=true;render();if(sbUser)pull(true);});
+  sb.auth.onAuthStateChange((ev,session)=>{
+    const u=session?session.user:null,was=sbUser;sbUser=u;
+    if(u&&(!was||was.id!==u.id)){render();pull(true);}
+    if(!u&&was){render();}
+  });
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden&&sbUser)pull(false);});
+  window.addEventListener('online',()=>{if(sbUser)pull(false);});
+  setInterval(()=>{if(sbUser&&!document.hidden)pull(false);},60000);
+}
+function authHTML(){
+  if(!authReady)return '<div class="auth"><div class="sub">Загрузка…</div></div>';
+  return `<div class="auth stack"><h1>План</h1><div class="sub">Войди, чтобы данные были одинаковыми на телефоне и ноутбуке.</div>
+  <form class="form" id="auth-form" autocomplete="on"><label>Почта<input class="in" id="au-email" type="email" autocomplete="username" required></label>
+  <label>Пароль<input class="in" id="au-pass" type="password" autocomplete="current-password" minlength="6" required></label>
+  <div class="row"><button class="btn pri" type="submit" data-mode="in"${authBusy?' disabled':''}>Войти</button><button class="btn" type="button" data-a="au-up"${authBusy?' disabled':''}>Создать аккаунт</button></div></form>
+  ${authMsg?`<div class="note">${esc(authMsg)}</div>`:''}
+  <div class="sub">Пароль не меньше 6 символов. Вход запоминается, вводить его каждый раз не нужно.</div></div>`;
+}
+function conflictHTML(){
+  const s=conflict.server,cnt=m=>(m.items||[]).length;
+  return `<div class="panel stack"><b>В облаке и на этом устройстве разные данные</b><div class="sub">Это бывает при первом входе на втором устройстве. Выбери, что оставить. Другой вариант заменится.</div>
+  <div class="row"><button class="btn pri" data-a="cf-server">Взять из облака (${cnt(s)} дел)</button><button class="btn" data-a="cf-local">Оставить с этого устройства (${cnt(M)} дел)</button></div></div>`;
+}
+async function authSubmit(mode){
+  const em=(document.getElementById('au-email')||{}).value||'',pw=(document.getElementById('au-pass')||{}).value||'';
+  if(!em||pw.length<6){authMsg='Впиши почту и пароль не короче 6 символов.';render();return;}
+  authBusy=true;authMsg='';render();
+  try{
+    if(mode==='up'){const {data,error}=await sb.auth.signUp({email:em.trim(),password:pw});if(error)throw error;if(!data.session)authMsg='Аккаунт создан. Проверь почту и подтверди её, потом войди.';}
+    else{const {error}=await sb.auth.signInWithPassword({email:em.trim(),password:pw});if(error)throw error;}
+  }catch(e){const m=(e&&e.message)||'';authMsg=/Invalid login/i.test(m)?'Неверная почта или пароль.':/already registered/i.test(m)?'Такой аккаунт уже есть. Нажми «Войти».':/Email not confirmed/i.test(m)?'Почта ещё не подтверждена. Открой письмо от Supabase.':'Не получилось: '+m;}
+  authBusy=false;render();
+  const e1=document.getElementById('au-email');if(e1&&!e1.value)e1.value=em;
+}
+document.addEventListener('submit',e=>{if(e.target.id==='auth-form'){e.preventDefault();authSubmit('in');}});
+
 function showErr(m){try{let b=document.getElementById('errb');if(!b){b=document.createElement('div');b.id='errb';b.setAttribute('style','position:fixed;left:12px;right:12px;top:calc(8px + env(safe-area-inset-top,0px));z-index:50;background:#a2332a;color:#fff;padding:12px 14px;border-radius:12px;font-size:13px;line-height:1.35');b.onclick=()=>b.remove();document.body.appendChild(b);}b.textContent='Ошибка: '+String(m).slice(0,160)+' (нажми, чтобы закрыть)';}catch(_){}}
 window.addEventListener('error',ev=>showErr(ev.message));
 window.addEventListener('unhandledrejection',ev=>showErr((ev.reason&&ev.reason.message)||ev.reason));
@@ -554,9 +634,9 @@ function dayView(){
   const d=curDay,td=todayK(),dd=pd(d),wk=wkKey(d),we=addDays(wk,6),pc=M.settings.perCat,u=ui();
   let h=`<div class="dhead"><div><h1>${dayTitle(d)}</h1><div class="sub">${dd.getDate()} ${MGEN[dd.getMonth()]}, ${WDN[dd.getDay()]}</div></div><div class="row" style="gap:4px">${d!==td?`<button class="btn sm" data-a="goday" data-d="${td}">Сегодня</button>`:''}<button class="ico gear" data-a="kit" aria-label="Конструктор вида"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 2.8a7.2 7.2 0 1 0 0 14.4c1 0 1.4-.6 1.4-1.3 0-.9-.8-1.2-.8-2.1 0-.8.6-1.3 1.4-1.3h1.6a3.6 3.6 0 0 0 3.6-3.6C17.2 5.6 14 2.8 10 2.8z"></path><circle cx="6.4" cy="9" r=".9" fill="currentColor"></circle><circle cx="9" cy="6" r=".9" fill="currentColor"></circle><circle cx="12.6" cy="6.6" r=".9" fill="currentColor"></circle></svg></button><button class="ico gear" data-a="settings" aria-label="Настройки"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M3 6h9M15 6h2M3 14h2M8 14h9"></path><circle cx="13.5" cy="6" r="1.8"></circle><circle cx="6.5" cy="14" r="1.8"></circle></svg></button></div></div>`;
   if(kitOpen)h+=kitHTML();
-  {const lb=M.settings.lastBackup,old=!lb||Math.round((pd(td)-pd(lb))/864e5)>=10;if(old&&M.settings.tips&&Object.keys(M.plan).length)h+=`<div class="panel row" style="justify-content:space-between"><span class="sub" style="flex:1;min-width:180px">${lb?'Последняя копия данных была '+fmtD(lb)+'.':'Копии данных ещё не было.'} Сохрани её, чтобы ничего не потерять.</span><button class="btn sm" data-a="go" data-v="review">К копии</button></div>`;}
+  {const lb=M.settings.lastBackup,old=!lb||Math.round((pd(td)-pd(lb))/864e5)>=10;if(old&&M.settings.tips&&!sbUser&&Object.keys(M.plan).length)h+=`<div class="panel row" style="justify-content:space-between"><span class="sub" style="flex:1;min-width:180px">${lb?'Последняя копия данных была '+fmtD(lb)+'.':'Копии данных ещё не было.'} Сохрани её, чтобы ничего не потерять.</span><button class="btn sm" data-a="go" data-v="review">К копии</button></div>`;}
   if(localOnly)h+='<div class="panel stack"><b>Данные сохраняются только на этом устройстве</b><div class="sub">Здесь нет связи с твоим аккаунтом, поэтому отметки с телефона и с компьютера не попадают друг к другу. Открой страницу из приложения Claude, где ты вошла в аккаунт.</div></div>';
-  if(settingsOpen)h+=`<div class="panel stack"><h2>Настройки</h2><div class="setrow"><span>Шагов в каждой сфере за неделю</span><div class="row"><button class="step" data-a="pc-dec" aria-label="Меньше">−</button><b>${pc}</b><button class="step" data-a="pc-inc" aria-label="Больше">+</button></div></div><div class="sub">Кольцо сферы замыкается, когда за неделю в ней сделано столько шагов. Это ориентир, а не обязаловка.</div><label class="setrow"><span>Мягкие подсказки</span><input type="checkbox" data-set="tips"${M.settings.tips?' checked':''}></label></div>`;
+  if(settingsOpen)h+=`<div class="panel stack"><h2>Настройки</h2>${sbUser?`<div class="setrow"><span class="sub">Аккаунт: ${esc(sbUser.email||'')}</span><button class="btn sm" data-a="au-out">Выйти</button></div>`:''}<div class="setrow"><span>Шагов в каждой сфере за неделю</span><div class="row"><button class="step" data-a="pc-dec" aria-label="Меньше">−</button><b>${pc}</b><button class="step" data-a="pc-inc" aria-label="Больше">+</button></div></div><div class="sub">Кольцо сферы замыкается, когда за неделю в ней сделано столько шагов. Это ориентир, а не обязаловка.</div><label class="setrow"><span>Мягкие подсказки</span><input type="checkbox" data-set="tips"${M.settings.tips?' checked':''}></label></div>`;
   // полоса недели
   h+=`<div class="strip"><button class="arr" data-a="goday" data-d="${addDays(d,-1)}" aria-label="Предыдущий день">‹</button>`;
   for(let i=0;i<7;i++){const x=addDays(wk,i),n=(M.plan[x]||[]).length,dn=acts(x,x).length;
@@ -742,7 +822,7 @@ function reviewView(){
   const from=days[0],stale=M.items.filter(i=>i.kind==='goal'&&!i.done&&!i.steps.some(s=>s.done&&s.doneAt>=from));
   if(stale.length)h+=`<section class="card stack"><h2>Что пересмотреть</h2><div class="sub">В этих целях не было шагов две недели. Это не вина, а сигнал: может, разбить следующий шаг помельче или поменять приоритет?</div>${stale.map(i=>{const nx=i.steps.find(s=>!s.done);return `<div><b>${esc(i.t)}</b>${nx?`<div class="sub">Следующий шаг: ${esc(nx.t)}</div>`:'<div class="sub">Шагов нет</div>'}</div>`;}).join('')}</section>`;
   h+=`<section class="card stack"><h2>Заметки</h2><div class="sub">Что сработало, что мешало. Пара строк раз в несколько дней.</div><textarea class="in" id="note-in" maxlength="600" placeholder="Например: недельный план удобнее, чем дневной."></textarea><div><button class="btn pri" data-a="note-add">Сохранить заметку</button></div>${(M.notes||[]).slice().reverse().map(n=>`<div class="nrow"><div><small>${n.d}</small>${esc(n.t)}</div><button class="ico" data-a="note-del" data-id="${n.id}" aria-label="Удалить заметку">×</button></div>`).join('')}</section>`;
-  h+=`<section class="card stack"><h2>Копия данных</h2><div class="sub">Данные живут только на этом устройстве. Сохраняй копию раз в неделю: из неё можно всё восстановить на новом телефоне или после очистки браузера.</div><div class="sub">${M.settings.lastBackup?'Последняя копия: '+fmtD(M.settings.lastBackup):'Копий ещё не было.'}</div><div class="row"><button class="btn" data-a="backup">Скачать копию</button><label class="btn filebtn">Восстановить из копии<input type="file" accept=".json,application/json" data-set="restore"></label></div>${backupMsg?`<div class="sub">${esc(backupMsg)}</div>`:''}${backupText?`<textarea class="in" readonly onfocus="this.select()">${esc(backupText)}</textarea>`:''}${pendingRestore?`<div class="panel stack"><b>Заменить текущие данные данными из копии?</b><div class="sub">В копии дел и целей: ${pendingRestore.items.length}. Текущие данные будут заменены.</div><div class="row"><button class="btn pri" data-a="restore-yes">Да, заменить</button><button class="btn" data-a="restore-no">Отмена</button></div></div>`:''}</section>`;
+  h+=`<section class="card stack"><h2>Копия данных</h2><div class="sub">${sbUser?'Данные сами синхронизируются через облако. Копия нужна только на всякий случай.':'Данные живут только на этом устройстве. Сохраняй копию раз в неделю.'}</div><div class="sub">${M.settings.lastBackup?'Последняя копия: '+fmtD(M.settings.lastBackup):'Копий ещё не было.'}</div><div class="row"><button class="btn" data-a="backup">Скачать копию</button><label class="btn filebtn">Восстановить из копии<input type="file" accept=".json,application/json" data-set="restore"></label></div>${backupMsg?`<div class="sub">${esc(backupMsg)}</div>`:''}${backupText?`<textarea class="in" readonly onfocus="this.select()">${esc(backupText)}</textarea>`:''}${pendingRestore?`<div class="panel stack"><b>Заменить текущие данные данными из копии?</b><div class="sub">В копии дел и целей: ${pendingRestore.items.length}. Текущие данные будут заменены.</div><div class="row"><button class="btn pri" data-a="restore-yes">Да, заменить</button><button class="btn" data-a="restore-no">Отмена</button></div></div>`:''}</section>`;
   return h;
 }
 
@@ -750,7 +830,10 @@ function reviewView(){
 function render(){
   applyUI();
   const app=document.getElementById('app');
-  let h=view==='goals'?goalsView():view==='review'?reviewView():dayView();
+  const nb=document.getElementById('bnav');
+  if(sb&&!sbUser){app.innerHTML=authHTML();nb.hidden=true;return;}
+  nb.hidden=false;
+  let h=(conflict?conflictHTML():'')+(view==='goals'?goalsView():view==='review'?reviewView():dayView());
   h+=`<div class="foot" id="sync">${esc(syncMsg)}</div>`;
   app.innerHTML=h;
   const ic={day:'<circle cx="11" cy="11" r="7.5"></circle><path d="M11 6.8V11l2.8 1.8"></path>',week:'<rect x="3.5" y="5" width="15" height="13" rx="2.5"></rect><path d="M3.5 9.5h15M8 3.5v3M14 3.5v3"></path>',goals:'<circle cx="11" cy="11" r="7.5"></circle><circle cx="11" cy="11" r="3.5"></circle><circle cx="11" cy="11" r=".6"></circle>',balance:'<path d="M11 3.5v15M3.5 11h15M5.7 5.7l10.6 10.6M16.3 5.7 5.7 16.3"></path><circle cx="11" cy="11" r="7.5"></circle>',review:'<path d="M5 17V11M11 17V5M17 17v-8"></path>'};
@@ -781,6 +864,10 @@ document.addEventListener('click',e=>{
     else if(it.quick)removeItem(it.id);
     else{it.done=false;it.doneAt=null;}
     render();persist();break;}
+  case 'au-up':authSubmit('up');break;
+  case 'au-out':if(sb){sb.auth.signOut();try{localStorage.removeItem(linkKey());}catch(_){}}settingsOpen=false;break;
+  case 'cf-server':if(conflict){M=conflict.server;conflict=null;saveLocal();try{localStorage.setItem(linkKey(),'1');}catch(_){}render();setMsg('Синхронизировано · '+(sbUser.email||''));}break;
+  case 'cf-local':if(conflict){conflict=null;M.rev=Date.now();saveLocal();render();push();}break;
   case 'kit':kitOpen=!kitOpen;settingsOpen=false;render();break;
   case 'umv':{const u=ui(),k=b.dataset.k,i=u.order.indexOf(k),j=i+(+b.dataset.v);if(i<0||j<0||j>=u.order.length)break;u.order.splice(i,1);u.order.splice(j,0,k);render();persist();break;}
   case 'uset':{const u=ui(),k=b.dataset.k,v=b.dataset.v;u[k]=k==='cards'?v==='true':v;applyUI();render();persist();break;}
@@ -906,7 +993,7 @@ try{
   for(const key of ['plan-model5','plan-model4','plan-model3','plan-model2','plan-model']){const s=localStorage.getItem(key);if(s){a=adopt(JSON.parse(s));if(a)break;}}
   if(a)M=a;
 }catch(_){}
-parseHash();render();
+parseHash();sbInit();render();
 if('serviceWorker' in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
 try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist();}catch(_){}
 </script>
